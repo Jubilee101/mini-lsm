@@ -30,6 +30,8 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::merge_iterator::MergeIterator;
+use crate::iterators::StorageIterator;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
@@ -305,9 +307,9 @@ impl LsmStorageInner {
                 Ok(None)
             } else {
                 Ok(Some(val))
-            }
+            };
         }
-        
+
         // check the frozen memtables from the newest to the oldest
         for imm_table in &guard.imm_memtables {
             if let Some(val) = imm_table.get(_key) {
@@ -315,10 +317,10 @@ impl LsmStorageInner {
                     Ok(None)
                 } else {
                     Ok(Some(val))
-                }
+                };
             }
         }
-        
+
         Ok(None)
     }
 
@@ -333,11 +335,11 @@ impl LsmStorageInner {
         // I don't think we can drop the guard here, because otherwise another thread can freeze the memtable
         guard.memtable.put(_key, _value)?;
         let approximate_size = guard.memtable.approximate_size();
-        // it's crucial to drop the guard here, otherwise it may try waiting for the state lock 
-        // that's currently grabbed by another thread that's waiting to grab the write lock 
+        // it's crucial to drop the guard here, otherwise it may try waiting for the state lock
+        // that's currently grabbed by another thread that's waiting to grab the write lock
         // (and it can't if the read guard isn't dropped here)
         drop(guard);
-        
+
         self.try_freeze_memtable(approximate_size)
     }
 
@@ -375,9 +377,9 @@ impl LsmStorageInner {
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
         let memtable = Arc::new(MemTable::create(self.next_sst_id()));
-        
+
         let rguard = self.state.read();
-        
+
         // make a snapshot of the current state
         // as_ref extracts the inner mem Arc wraps, otherwise you are just cloning Arc itself
         // clone() can be done because LsmStorageState has Clone() trait derived
@@ -386,8 +388,8 @@ impl LsmStorageInner {
         // this often cannot be done because it's unsafe due to Arc's nature of being shared by many.
         // For this reason, you shouldn't wrap snapshot inside Arc too early if you want to change the fields within
         let mut snapshot = rguard.as_ref().clone();
-        
-        // The following line is result-wise equivalent to 
+
+        // The following line is result-wise equivalent to
         //
         // let old_memtable = snapshot.memtable.clone();
         // snapshot.memtable = memtable;
@@ -398,15 +400,15 @@ impl LsmStorageInner {
         // before that the old_mentable can still have kv pairs put into it by other threads
         // they may also try freezing the memtable, but will be blocked by the state_lock
         snapshot.imm_memtables.insert(0, old_memtable);
-        
+
         drop(rguard);
-        
+
         let mut guard = self.state.write();
         // change what guard points directly
         *guard = Arc::new(snapshot);
-        
+
         drop(guard);
-        
+
         Ok(())
     }
 
@@ -426,17 +428,30 @@ impl LsmStorageInner {
         _lower: Bound<&[u8]>,
         _upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        unimplemented!()
+        let mut iters = vec![];
+
+        let guard = self.state.read();
+
+        iters.push(Box::new(guard.memtable.scan(_lower, _upper)));
+
+        for iter in &guard.imm_memtables {
+            iters.push(Box::new(iter.scan(_lower, _upper)));
+        }
+
+        let miter = MergeIterator::create(iters);
+        let iter = FusedIterator::new(LsmIterator::new(miter)?);
+        
+        Ok(iter)
     }
-    
+
     fn try_freeze_memtable(&self, size: usize) -> Result<()> {
         if size > self.options.target_sst_size {
             let lock = self.state_lock.lock();
-            
+
             let rguard = self.state.read();
             let cur_size = rguard.memtable.approximate_size();
             drop(rguard);
-            
+
             if cur_size.ge(&self.options.target_sst_size) {
                 self.force_freeze_memtable(&lock)?;
             }

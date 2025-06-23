@@ -15,15 +15,15 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
+use anyhow::Result;
+use bytes::Bytes;
+use crossbeam_skiplist::SkipMap;
+use ouroboros::self_referencing;
 use std::ops::Bound;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
-use anyhow::Result;
-use bytes::Bytes;
-use crossbeam_skiplist::SkipMap;
-use ouroboros::self_referencing;
 
 use crate::iterators::StorageIterator;
 use crate::key::KeySlice;
@@ -106,7 +106,8 @@ impl MemTable {
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
         self.map
             .insert(Bytes::copy_from_slice(_key), Bytes::copy_from_slice(_value));
-        self.approximate_size.fetch_add(_key.len() + _value.len(), Relaxed);
+        self.approximate_size
+            .fetch_add(_key.len() + _value.len(), Relaxed);
         Ok(())
     }
 
@@ -124,7 +125,13 @@ impl MemTable {
 
     /// Get an iterator over a range of keys.
     pub fn scan(&self, _lower: Bound<&[u8]>, _upper: Bound<&[u8]>) -> MemTableIterator {
-        unimplemented!()
+        let mut iter = MemTableIterator::new(self.map.clone(), 
+                                         |map| {
+                                             map.range((map_bound(_lower), map_bound(_upper)))
+                                         }, 
+                                         (Bytes::new(), Bytes::new()));
+        iter.next().expect("error init the iterator");
+        iter
     }
 
     /// Flush the mem-table to SSTable. Implement in week 1 day 6.
@@ -170,18 +177,28 @@ impl StorageIterator for MemTableIterator {
     type KeyType<'a> = KeySlice<'a>;
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.with_item(|item| &item.1)
     }
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        self.with_item(|item| Self::KeyType::from_slice(&item.0))
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        self.with_item(|item| !item.0.is_empty())
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let mut e = (Bytes::new(), Bytes::new());
+        self.with_iter_mut(|iter| {
+            if let Some(entry) = iter.next() {
+                e = (entry.key().clone(), entry.value().clone());
+            }
+        });
+        
+        self.with_item_mut(|item| {
+            *item = e;
+        });
+        Ok(())
     }
 }

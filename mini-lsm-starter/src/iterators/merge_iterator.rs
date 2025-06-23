@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
-use std::cmp::{self};
+use std::cmp::{self, Ordering};
+use std::collections::binary_heap::PeekMut;
 use std::collections::BinaryHeap;
-
-use anyhow::Result;
-
-use crate::key::KeySlice;
+use std::mem;
+use std::ops::{Deref, DerefMut};
+use std::process::id;
+use anyhow::{anyhow, Result};
+use log::error;
+use crate::key::{Key, KeySlice};
 
 use super::StorageIterator;
 
@@ -59,7 +59,28 @@ pub struct MergeIterator<I: StorageIterator> {
 
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
-        unimplemented!()
+        let mut heap = BinaryHeap::new();
+        
+        if iters.is_empty() {
+            let mut miter = MergeIterator {
+                iters: heap,
+                current: None
+            };
+            return miter;
+        }
+        
+        for (idx, iter) in iters.into_iter().enumerate() {
+            if !iter.is_valid() {
+                continue
+            }
+            heap.push(HeapWrapper(idx, iter));
+        }
+        
+        let current = heap.pop();
+        MergeIterator {
+            iters: heap,
+            current: current,
+        }
     }
 }
 
@@ -69,18 +90,53 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn key(&self) -> KeySlice {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.key()
     }
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.current.as_ref().unwrap().1.value()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        // could be cases where current becomes invalid, and we can't find any iter to substitute
+        self.current.as_ref().map(|cur| cur.1.is_valid()).unwrap_or(false)
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        // assume next won't be called before is_valid
+        let current = self.current.as_mut().unwrap();
+        // wrapper's lifetime is too short. We cannot keep anything inside beyond that life time
+        // that's why we keep current
+        // we'll try to advance the iters so that they all skip the current key, then do the same with current
+        // be mindful about none and in valid iters
+        while let Some(mut wrapper) = self.iters.peek_mut() {
+            if wrapper.1.key() != current.1.key() {
+                break;
+            }
+            if let e @ Err(_) = wrapper.1.next() {
+                PeekMut::pop(wrapper);
+                return e;
+            }
+            if !wrapper.1.is_valid() {
+                PeekMut::pop(wrapper);
+            }
+        }
+        
+        current.1.next()?;
+        
+        if !current.1.is_valid() {
+            if let Some(wrapper) = self.iters.pop() {
+                *current = wrapper;
+            }
+            return Ok(());
+        } 
+        
+        if let Some(mut wrapper) = self.iters.peek_mut() {
+            if &mut *wrapper > current {
+                std::mem::swap(&mut *wrapper, current)
+            }
+        }
+        
+        Ok(())
     }
 }
