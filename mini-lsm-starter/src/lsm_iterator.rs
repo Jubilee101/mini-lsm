@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 use crate::{
     iterators::{StorageIterator, merge_iterator::MergeIterator},
@@ -28,15 +28,13 @@ pub struct LsmIterator {
 
 impl LsmIterator {
     pub(crate) fn new(iter: LsmIteratorInner) -> Result<Self> {
-        let mut iter = Self {
-            inner: iter,
-        };
-        
+        let mut iter = Self { inner: iter };
+
         iter.advance_to_non_deleted()?;
-        
+
         Ok(iter)
     }
-    
+
     fn advance_to_non_deleted(&mut self) -> Result<()> {
         while self.inner.is_valid() && self.inner.value().is_empty() {
             self.inner.next()?;
@@ -92,7 +90,7 @@ impl<I: StorageIterator> StorageIterator for FusedIterator<I> {
 
     fn is_valid(&self) -> bool {
         if self.has_errored {
-            return false
+            return false;
         }
         self.iter.is_valid()
     }
@@ -101,7 +99,7 @@ impl<I: StorageIterator> StorageIterator for FusedIterator<I> {
         if !self.is_valid() {
             panic!("calling key() when iterator is invalid")
         }
-        
+
         self.iter.key()
     }
 
@@ -109,7 +107,7 @@ impl<I: StorageIterator> StorageIterator for FusedIterator<I> {
         if !self.is_valid() {
             panic!("calling value() when iterator is invalid")
         }
-        
+
         self.iter.value()
     }
 
@@ -117,16 +115,16 @@ impl<I: StorageIterator> StorageIterator for FusedIterator<I> {
         if self.has_errored {
             bail!("iterator has errored out")
         }
-        
+
         if !self.is_valid() {
-            return Ok(())
+            return Ok(());
         }
-        
+
         if let e @ Err(_) = self.iter.next() {
             self.has_errored = true;
-            return e
+            return e;
         }
-        
+
         Ok(())
     }
 }

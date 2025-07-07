@@ -30,8 +30,8 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
-use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::StorageIterator;
+use crate::iterators::merge_iterator::MergeIterator;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
@@ -440,7 +440,7 @@ impl LsmStorageInner {
 
         let miter = MergeIterator::create(iters);
         let iter = FusedIterator::new(LsmIterator::new(miter)?);
-        
+
         Ok(iter)
     }
 

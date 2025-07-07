@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::key::{Key, KeySlice};
+use anyhow::{Result, anyhow};
+use log::error;
 use std::cmp::{self, Ordering};
-use std::collections::binary_heap::PeekMut;
 use std::collections::BinaryHeap;
+use std::collections::binary_heap::PeekMut;
 use std::mem;
 use std::ops::{Deref, DerefMut};
 use std::process::id;
-use anyhow::{anyhow, Result};
-use log::error;
-use crate::key::{Key, KeySlice};
 
 use super::StorageIterator;
 
@@ -60,22 +60,22 @@ pub struct MergeIterator<I: StorageIterator> {
 impl<I: StorageIterator> MergeIterator<I> {
     pub fn create(iters: Vec<Box<I>>) -> Self {
         let mut heap = BinaryHeap::new();
-        
+
         if iters.is_empty() {
             let mut miter = MergeIterator {
                 iters: heap,
-                current: None
+                current: None,
             };
             return miter;
         }
-        
+
         for (idx, iter) in iters.into_iter().enumerate() {
             if !iter.is_valid() {
-                continue
+                continue;
             }
             heap.push(HeapWrapper(idx, iter));
         }
-        
+
         let current = heap.pop();
         MergeIterator {
             iters: heap,
@@ -99,7 +99,10 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
 
     fn is_valid(&self) -> bool {
         // could be cases where current becomes invalid, and we can't find any iter to substitute
-        self.current.as_ref().map(|cur| cur.1.is_valid()).unwrap_or(false)
+        self.current
+            .as_ref()
+            .map(|cur| cur.1.is_valid())
+            .unwrap_or(false)
     }
 
     fn next(&mut self) -> Result<()> {
@@ -121,22 +124,22 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
                 PeekMut::pop(wrapper);
             }
         }
-        
+
         current.1.next()?;
-        
+
         if !current.1.is_valid() {
             if let Some(wrapper) = self.iters.pop() {
                 *current = wrapper;
             }
             return Ok(());
-        } 
-        
+        }
+
         if let Some(mut wrapper) = self.iters.peek_mut() {
             if &mut *wrapper > current {
                 std::mem::swap(&mut *wrapper, current)
             }
         }
-        
+
         Ok(())
     }
 }

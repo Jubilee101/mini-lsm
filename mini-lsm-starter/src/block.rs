@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 mod builder;
 mod iterator;
 
@@ -32,11 +29,35 @@ impl Block {
     /// Encode the internal data to the data layout illustrated in the course
     /// Note: You may want to recheck if any of the expected field is missing from your output
     pub fn encode(&self) -> Bytes {
-        unimplemented!()
+        let mut block = Vec::new();
+        let mut offsets_encoded = Vec::new();
+        for offset in &self.offsets {
+            offsets_encoded.extend_from_slice(&offset.to_ne_bytes());
+        }
+        block.extend_from_slice(&self.data[..]);
+        block.extend_from_slice(&offsets_encoded[..]);
+
+        let num_entries = self.offsets.len() as u16;
+        block.extend_from_slice(&num_entries.to_ne_bytes());
+
+        Bytes::from(block)
     }
 
     /// Decode from the data layout, transform the input `data` to a single `Block`
     pub fn decode(data: &[u8]) -> Self {
-        unimplemented!()
+        assert!(data.len() >= 2);
+        let num_bytes = &data[data.len() - 2..];
+        let num = u16::from_ne_bytes([num_bytes[0], num_bytes[1]]);
+        let offset_bytes = &data[(data.len() - 2 * (num as usize + 1))..data.len() - 2];
+        let mut offsets = Vec::new();
+
+        for i in (0..offset_bytes.len()).step_by(2) {
+            offsets.push(u16::from_ne_bytes([offset_bytes[i], offset_bytes[i + 1]]))
+        }
+
+        Self {
+            offsets,
+            data: Vec::from(&data[0..(data.len() - 2 * (num as usize + 1))]),
+        }
     }
 }

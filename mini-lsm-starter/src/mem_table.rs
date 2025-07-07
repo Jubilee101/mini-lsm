@@ -125,11 +125,11 @@ impl MemTable {
 
     /// Get an iterator over a range of keys.
     pub fn scan(&self, _lower: Bound<&[u8]>, _upper: Bound<&[u8]>) -> MemTableIterator {
-        let mut iter = MemTableIterator::new(self.map.clone(), 
-                                         |map| {
-                                             map.range((map_bound(_lower), map_bound(_upper)))
-                                         }, 
-                                         (Bytes::new(), Bytes::new()));
+        let mut iter = MemTableIterator::new(
+            self.map.clone(),
+            |map| map.range((map_bound(_lower), map_bound(_upper))),
+            (Bytes::new(), Bytes::new()),
+        );
         iter.next().expect("error init the iterator");
         iter
     }
@@ -195,7 +195,7 @@ impl StorageIterator for MemTableIterator {
                 e = (entry.key().clone(), entry.value().clone());
             }
         });
-        
+
         self.with_item_mut(|item| {
             *item = e;
         });
