@@ -48,7 +48,7 @@ impl BlockBuilder {
         let key_size = key.len() as u16;
         let value_size = value.len() as u16;
 
-        if self.size() + (2 + key_size as usize + 2 + value_size as usize + 2) >= self.block_size
+        if self.size() + (2 + key_size as usize + 2 + value_size as usize + 2) > self.block_size
             && !self.first_key.is_empty()
         {
             return false;
