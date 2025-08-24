@@ -32,11 +32,13 @@ use crate::compact::{
 };
 use crate::iterators::StorageIterator;
 use crate::iterators::merge_iterator::MergeIterator;
+use crate::iterators::two_merge_iterator::TwoMergeIterator;
+use crate::key::KeySlice;
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
 use crate::mvcc::LsmMvccInner;
-use crate::table::SsTable;
+use crate::table::{SsTable, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -300,24 +302,46 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        let guard = self.state.read();
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
+        let mut sstable_iters = vec![];
+
         // check the current memtable
-        if let Some(val) = guard.memtable.get(_key) {
-            return if val.is_empty() {
-                Ok(None)
-            } else {
+        if let Some(val) = snapshot.memtable.get(_key) {
+            return if !val.is_empty() {
                 Ok(Some(val))
+            } else {
+                Ok(None)
             };
         }
 
         // check the frozen memtables from the newest to the oldest
-        for imm_table in &guard.imm_memtables {
+        for imm_table in &snapshot.imm_memtables {
             if let Some(val) = imm_table.get(_key) {
-                return if val.is_empty() {
-                    Ok(None)
-                } else {
+                return if !val.is_empty() {
                     Ok(Some(val))
+                } else {
+                    Ok(None)
                 };
+            }
+        }
+
+        for table_id in snapshot.l0_sstables.iter() {
+            let table = snapshot.sstables[table_id].clone();
+            let mut iter: SsTableIterator;
+            iter = SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(_key))?;
+
+            if iter.is_valid() {
+                sstable_iters.push(Box::new(iter));
+            }
+        }
+
+        let miter = MergeIterator::create(sstable_iters);
+        if miter.is_valid() && miter.key() == KeySlice::from_slice(_key) {
+            if !miter.value().is_empty() {
+                return Ok(Some(Bytes::copy_from_slice(miter.value())));
             }
         }
 
@@ -428,18 +452,59 @@ impl LsmStorageInner {
         _lower: Bound<&[u8]>,
         _upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        let mut iters = vec![];
+        let mut memtable_iters = vec![];
+        let mut sstable_iters = vec![];
 
-        let guard = self.state.read();
+        let mut snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        }; // the lock is dropped here, 
+        // it's safe since even there are insert into the memtable skiplist
+        // because recall that crossbeam skip list only need an immutable reference
+        // this is achieved because the skip list has lock free atomic APIs, you are only seeing a snapshot
 
-        iters.push(Box::new(guard.memtable.scan(_lower, _upper)));
+        memtable_iters.push(Box::new(snapshot.memtable.scan(_lower, _upper)));
 
-        for iter in &guard.imm_memtables {
-            iters.push(Box::new(iter.scan(_lower, _upper)));
+        for iter in &snapshot.imm_memtables {
+            memtable_iters.push(Box::new(iter.scan(_lower, _upper)));
         }
 
-        let miter = MergeIterator::create(iters);
-        let iter = FusedIterator::new(LsmIterator::new(miter)?);
+        for table_id in snapshot.l0_sstables.iter() {
+            let table = snapshot.sstables[table_id].clone();
+            let mut iter: SsTableIterator;
+            match _lower {
+                Bound::Unbounded => {
+                    iter = SsTableIterator::create_and_seek_to_first(table.clone())?
+                }
+                Bound::Included(bound) => {
+                    iter =
+                        SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(bound))?
+                }
+                Bound::Excluded(bound) => {
+                    iter = SsTableIterator::create_and_seek_to_key(
+                        table,
+                        KeySlice::from_slice(bound),
+                    )?;
+                    // TODO: why is this enough, do we guarantee the first keys in blocks are ordered?
+                    while iter.is_valid() && iter.key() == KeySlice::from_slice(bound) {
+                        iter.next()?;
+                    }
+                }
+            }
+            if iter.is_valid() {
+                sstable_iters.push(Box::new(iter));
+            }
+        }
+
+        //TODO: level iters
+
+        let miter1 = MergeIterator::create(memtable_iters);
+        let miter2 = MergeIterator::create(sstable_iters);
+        let two_merge_iter = TwoMergeIterator::create(miter1, miter2)?;
+        let iter = FusedIterator::new(LsmIterator::new(
+            two_merge_iter,
+            _upper.map(|bound| Bytes::copy_from_slice(bound)),
+        )?);
 
         Ok(iter)
     }
