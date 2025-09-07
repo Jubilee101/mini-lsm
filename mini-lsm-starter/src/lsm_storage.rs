@@ -16,6 +16,7 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use std::collections::HashMap;
+use std::{fs, mem};
 use std::ops::{Bound, Deref};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,7 +39,7 @@ use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
 use crate::mem_table::MemTable;
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SsTable, SsTableIterator};
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -173,7 +174,8 @@ impl Drop for MiniLsm {
 
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
-        unimplemented!()
+        self.flush_notifier.send(())?;
+        Ok(())
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -275,6 +277,10 @@ impl LsmStorageInner {
             CompactionOptions::NoCompaction => CompactionController::NoCompaction,
         };
 
+        if !path.exists() {
+            fs::create_dir_all(path)?
+        }
+
         let storage = Self {
             state: Arc::new(RwLock::new(Arc::new(state))),
             state_lock: Mutex::new(()),
@@ -330,6 +336,9 @@ impl LsmStorageInner {
 
         for table_id in snapshot.l0_sstables.iter() {
             let table = snapshot.sstables[table_id].clone();
+            if !key_within(table.first_key().as_key_slice(), table.last_key().as_key_slice(), _key) {
+                continue
+            }
             let mut iter: SsTableIterator;
             iter = SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(_key))?;
 
@@ -438,7 +447,36 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        unimplemented!()
+        // acquire the state lock first in case one memtable gets popped twice
+        let lock = self.state_lock.lock();
+        // copy on write, and drop read lock immediately
+        let mut snapshot = {
+            let guard = self.state.read();
+            guard.as_ref().clone()
+        };
+        
+        if snapshot.imm_memtables.is_empty() {
+            return Ok(())
+        }
+        
+        let memtable = snapshot.imm_memtables.pop().unwrap();
+        // flush the memtable to disk
+        let mut builder = SsTableBuilder::new(self.options.block_size);
+        memtable.flush(&mut builder)?;
+        let next_id = self.next_sst_id();
+        let table = builder.build(next_id, Some(self.block_cache.clone()), self.path_of_sst(next_id))?;
+        
+        // bookkeeping
+        snapshot.l0_sstables.insert(0, next_id);
+        snapshot.sstables.insert(next_id, Arc::new(table));
+        
+        // write the copy back
+        let mut wguard = self.state.write();
+        // this probably will work as well mem::replace(&mut *wguard, Arc::new(snapshot));
+        // the wguard and self.state sharing the same pointer that points to the same address,
+        // or you can directly change the changed fields I think
+        *wguard = Arc::new(snapshot);
+        Ok(())
     }
 
     pub fn new_txn(&self) -> Result<()> {
@@ -471,6 +509,9 @@ impl LsmStorageInner {
 
         for table_id in snapshot.l0_sstables.iter() {
             let table = snapshot.sstables[table_id].clone();
+            if !range_overlap(table.first_key().as_key_slice(), table.last_key().as_key_slice(), _lower, _upper) {
+                continue
+            }
             let mut iter: SsTableIterator;
             match _lower {
                 Bound::Unbounded => {
@@ -523,4 +564,52 @@ impl LsmStorageInner {
         }
         Ok(())
     }
+}
+
+fn range_overlap(table_first: KeySlice, table_last: KeySlice, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> bool {
+    match lower {
+        Bound::Unbounded => {
+            match upper {
+                Bound::Unbounded => {true}
+                Bound::Included(bound_upper) => {
+                    KeySlice::from_slice(bound_upper) >= table_first
+                }
+                Bound::Excluded(bound_upper) => {
+                    KeySlice::from_slice(bound_upper) > table_first
+                }
+            }
+        }
+        Bound::Included(bound_lower) => {
+            match upper {
+                Bound::Unbounded => {
+                    KeySlice::from_slice(bound_lower) <= table_last
+                }
+                Bound::Included(bound_upper) => {
+                    KeySlice::from_slice(bound_lower) <= table_last && KeySlice::from_slice(bound_upper) >= table_first
+                }
+                Bound::Excluded(bound_upper) => {
+                    KeySlice::from_slice(bound_lower) <= table_last && KeySlice::from_slice(bound_upper) > table_first
+                }
+            }
+        }
+        Bound::Excluded(bound_lower) => {
+            match upper {
+                Bound::Unbounded => {
+                    KeySlice::from_slice(bound_lower) < table_last
+                }
+                Bound::Included(bound_upper) => {
+                    KeySlice::from_slice(bound_lower) < table_last && KeySlice::from_slice(bound_upper) >= table_first
+                }
+                
+                Bound::Excluded(bound_upper) => {
+                    KeySlice::from_slice(bound_lower) < table_last && KeySlice::from_slice(bound_upper) > table_first
+                }
+            }
+        }
+    }
+}
+
+fn key_within(table_first: KeySlice, table_last: KeySlice, key: &[u8]) -> bool {
+    let key_slice = KeySlice::from_slice(key);
+    key_slice >= table_first && key_slice <= table_last
 }
